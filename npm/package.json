@@ -1,0 +1,33 @@
+{
+  "name": "lexipatch",
+  "version": "2.0.0",
+  "description": "LexiPatch (译铸) CLI — Software localization resource scanner, placeholder QA validator, and patcher.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "bin": {
+    "lexipatch": "bin/lexipatch.js"
+  },
+  "files": [
+    "bin/",
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "keywords": [
+    "localization",
+    "i18n",
+    "l10n",
+    "patcher",
+    "translation",
+    "cli"
+  ],
+  "author": "LexiPatch Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yangdw2024/LexiPatch.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
