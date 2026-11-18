@@ -753,7 +753,15 @@ fn patch_xml_like(raw: &str, map: &HashMap<&str, &str>) -> String {
                     "data" => current_data_name = None,
                     "value" => in_value = false,
                     "string" => current_string_name = None,
-                    "translation" => in_ts_translation = false,
+                    "translation" => {
+                        if in_ts_translation && !replaced_current_node {
+                            let key = format!("ts_{}", ts_idx);
+                            if let Some(new_val) = map.get(key.as_str()) {
+                                let _ = writer.write_event(Event::Text(BytesText::new(new_val)));
+                            }
+                        }
+                        in_ts_translation = false;
+                    }
                     "message" => {
                         if in_ts_message {
                             ts_idx += 1;
@@ -826,5 +834,41 @@ mod tests {
         assert!(patched.contains("# App config"));
         assert!(patched.contains("title = \"我的应用\" # inline"));
         assert!(patched.contains("count = 5"));
+    }
+
+    #[test]
+    fn test_qt_ts_patches_all_forms() {
+        let raw = r#"<?xml version="1.0" encoding="utf-8"?>
+<TS version="2.1" language="zh_CN">
+<context><name>QObject</name>
+  <message><source>Both</source><translation>Both</translation></message>
+  <message><source>Save</source><translation type="unfinished"></translation></message>
+  <message><source>Quit</source><translation type="unfinished"/></message>
+</context>
+</TS>"#;
+        let entries = parse_content(raw, "ts");
+        assert_eq!(entries.len(), 3);
+        let units = vec![
+            TranslationUnit {
+                id: "1".into(), file_id: "f".into(), project_id: "p".into(),
+                key_path: "ts_0".into(), source: "Both".into(), target: "双向".into(),
+                status: "translated".into(), qa_warning: None, term_hits: vec![], fuzzy_score: 100, updated_at: 0,
+            },
+            TranslationUnit {
+                id: "2".into(), file_id: "f".into(), project_id: "p".into(),
+                key_path: "ts_1".into(), source: "Save".into(), target: "保存".into(),
+                status: "translated".into(), qa_warning: None, term_hits: vec![], fuzzy_score: 100, updated_at: 0,
+            },
+            TranslationUnit {
+                id: "3".into(), file_id: "f".into(), project_id: "p".into(),
+                key_path: "ts_2".into(), source: "Quit".into(), target: "退出".into(),
+                status: "translated".into(), qa_warning: None, term_hits: vec![], fuzzy_score: 100, updated_at: 0,
+            },
+        ];
+        let patched = patch_content(raw, "ts", &units);
+        assert!(patched.contains("<translation>双向</translation>"));
+        assert!(patched.contains("<translation>保存</translation>"));
+        assert!(patched.contains("<translation>退出</translation>"));
+        assert!(!patched.contains("unfinished"));
     }
 }

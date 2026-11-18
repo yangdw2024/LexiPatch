@@ -65,6 +65,69 @@ fn locate_patcher_stub(app: &AppHandle) -> Result<PathBuf, String> {
     Err("未找到独立补丁引导器 (patcher-stub.exe)，请先编译 patcher-stub。".into())
 }
 
+fn find_lrelease() -> Option<PathBuf> {
+    if let Ok(out) = std::process::Command::new("where").arg("lrelease").output() {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if let Some(first) = s.lines().next() {
+                let p = PathBuf::from(first.trim());
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    for drive in ["D:\\Qt", "C:\\Qt"] {
+        let base = Path::new(drive);
+        if let Ok(entries) = fs::read_dir(base) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if let Ok(kits) = fs::read_dir(&p) {
+                    for k in kits.flatten() {
+                        let cand = k.path().join("bin").join("lrelease.exe");
+                        if cand.is_file() {
+                            return Some(cand);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn render_output_bytes(file: &ResourceFile, units: &[TranslationUnit]) -> Result<Vec<u8>, String> {
+    let patched_str = patch_content(&file.raw_content, &file.format, units);
+    if file.format == "ts" && file.target_rel_path.to_ascii_lowercase().ends_with(".qm") {
+        let lrelease = find_lrelease().ok_or_else(|| {
+            "目标路径为 Qt .qm 二进制文件，但未在系统 PATH 或 C:/D:\\Qt 中找到 lrelease.exe".to_string()
+        })?;
+        let tmp = std::env::temp_dir();
+        let uid = Uuid::new_v4().simple().to_string();
+        let ts_path = tmp.join(format!("lexipatch_{uid}.ts"));
+        let qm_path = tmp.join(format!("lexipatch_{uid}.qm"));
+        fs::write(&ts_path, patched_str.as_bytes()).map_err(|e| e.to_string())?;
+        let out = std::process::Command::new(&lrelease)
+            .arg(&ts_path)
+            .arg("-qm")
+            .arg(&qm_path)
+            .output()
+            .map_err(|e| format!("调用 lrelease 失败: {e}"))?;
+        let _ = fs::remove_file(&ts_path);
+        if !out.status.success() {
+            let _ = fs::remove_file(&qm_path);
+            return Err(format!(
+                "lrelease 编译 .qm 失败: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        let bytes = fs::read(&qm_path).map_err(|e| e.to_string())?;
+        let _ = fs::remove_file(&qm_path);
+        return Ok(bytes);
+    }
+    Ok(patched_str.into_bytes())
+}
+
 fn group_units(units: &[TranslationUnit]) -> HashMap<String, Vec<TranslationUnit>> {
     let mut map: HashMap<String, Vec<TranslationUnit>> = HashMap::new();
     for u in units {
@@ -106,8 +169,8 @@ pub fn build_exe_patcher(
 
         for file in &files {
             let file_units = by_file.get(&file.id).map(|v| v.as_slice()).unwrap_or(&[]);
-            let patched_str = patch_content(&file.raw_content, &file.format, file_units);
-            let patched_bytes = patched_str.as_bytes();
+            let patched_vec = render_output_bytes(file, file_units)?;
+            let patched_bytes = patched_vec.as_slice();
             let patched_hash = sha256_hex(patched_bytes);
 
             let target_norm = file.target_rel_path.replace('\\', "/");
@@ -201,10 +264,10 @@ pub fn build_zip_package(
 
     for file in &files {
         let file_units = by_file.get(&file.id).map(|v| v.as_slice()).unwrap_or(&[]);
-        let patched_str = patch_content(&file.raw_content, &file.format, file_units);
+        let patched_bytes = render_output_bytes(file, file_units)?;
         let entry_path = format!("localized/{}", file.target_rel_path.replace('\\', "/"));
         zip.start_file(&entry_path, opts).map_err(|e| e.to_string())?;
-        zip.write_all(patched_str.as_bytes())
+        zip.write_all(&patched_bytes)
             .map_err(|e| e.to_string())?;
     }
 
