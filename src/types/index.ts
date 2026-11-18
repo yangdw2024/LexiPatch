@@ -71,6 +71,11 @@ export interface LlmProfile {
   concurrency: number;
   batchSize: number;
   temperature: number;
+  reasoningEffort: "none" | "low" | "medium" | "high" | string;
+  maxTokens: number;
+  contextWindow: number;
+  maxRetries: number;
+  supportsVision: boolean;
   isDefault: boolean;
 }
 

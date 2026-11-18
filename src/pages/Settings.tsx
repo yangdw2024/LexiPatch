@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { api } from "@/lib/tauri";
 import type { LlmProfile } from "@/types";
-import { Plus, Trash2, CheckCircle2, Loader2, Zap } from "lucide-react";
+import { Plus, Trash2, CheckCircle2, Loader2, Zap, RefreshCw } from "lucide-react";
 
 export default function Settings() {
   const [profiles, setProfiles] = useState<LlmProfile[]>([]);
   const [editing, setEditing] = useState<LlmProfile | null>(null);
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
@@ -29,9 +31,27 @@ export default function Settings() {
     load();
   };
 
+  const handleFetchModels = async () => {
+    if (!editing) return;
+    setFetchingModels(true);
+    setTestResult(null);
+    try {
+      const models = await api.fetchLlmModels(editing.baseUrl, editing.apiKey);
+      setAvailableModels(models);
+      if (models.length > 0 && !models.includes(editing.model)) {
+        setEditing({ ...editing, model: models[0] });
+      }
+      setTestResult({ ok: true, msg: `成功获取到 ${models.length} 个可用模型` });
+    } catch (e) {
+      setTestResult({ ok: false, msg: String(e) });
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+
   const handleTest = async () => {
     if (!editing) return;
-    setTestingId(editing.id);
+    setTestingId(editing.id || "new");
     setTestResult(null);
     try {
       const msg = await api.testLlmConnection(editing);
@@ -44,16 +64,22 @@ export default function Settings() {
   };
 
   const handleAddNew = () => {
+    setAvailableModels([]);
     setEditing({
       id: "",
-      name: "自定义 OpenAI 兼容模型",
+      name: "本地网关 / 自定义 OpenAI",
       provider: "custom",
-      baseUrl: "https://api.openai.com/v1",
+      baseUrl: "http://127.0.0.1:8045/v1",
       apiKey: "",
-      model: "gpt-4o-mini",
+      model: "gemini-3.8-flash",
       concurrency: 4,
       batchSize: 25,
       temperature: 0.2,
+      reasoningEffort: "low",
+      maxTokens: 16384,
+      contextWindow: 1048576,
+      maxRetries: 3,
+      supportsVision: true,
       isDefault: false,
     });
     setTestResult(null);
@@ -71,7 +97,7 @@ export default function Settings() {
         <div>
           <h1 className="text-xl font-semibold text-slate-100">AI 大模型配置</h1>
           <p className="text-xs text-slate-400 mt-1">
-            支持 DeepSeek、通义千问、OpenAI、本地 Ollama 及任意 OpenAI 兼容接口（Rust 原生高并发调用）
+            支持任意 OpenAI 兼容网关、自动拉取模型目录、思考强度 (reasoning_effort)、上下文窗口、多模态与失败重试
           </p>
         </div>
         <button
@@ -83,13 +109,13 @@ export default function Settings() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-        {/* 左侧列表 */}
         <div className="space-y-2">
           {profiles.map((p) => (
             <div
               key={p.id}
               onClick={() => {
                 setEditing(p);
+                setAvailableModels([]);
                 setTestResult(null);
               }}
               className={`p-3 rounded-lg border cursor-pointer transition ${
@@ -108,12 +134,12 @@ export default function Settings() {
               </div>
               <div className="text-[11px] font-mono text-slate-400 mt-1 truncate">
                 {p.model} · 并发 {p.concurrency}
+                {p.reasoningEffort !== "none" ? ` · 思考:${p.reasoningEffort}` : ""}
               </div>
             </div>
           ))}
         </div>
 
-        {/* 右侧表单 */}
         <div className="md:col-span-2 rounded-lg border border-slate-800 bg-[#121821] p-5 space-y-4">
           {editing ? (
             <>
@@ -127,23 +153,31 @@ export default function Settings() {
                   />
                 </div>
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">模型名称 (Model)</label>
-                  <input
-                    value={editing.model}
-                    onChange={(e) => setEditing({ ...editing, model: e.target.value })}
+                  <label className="block text-xs text-slate-400 mb-1">思考强度 (reasoning_effort)</label>
+                  <select
+                    value={editing.reasoningEffort || "none"}
+                    onChange={(e) => setEditing({ ...editing, reasoningEffort: e.target.value })}
                     className="w-full px-3 py-2 rounded bg-[#0A0E14] border border-slate-700 text-xs text-slate-100 font-mono"
-                  />
+                  >
+                    <option value="none">关闭 (默认)</option>
+                    <option value="low">low (轻量推理，速度快)</option>
+                    <option value="medium">medium (均衡推理)</option>
+                    <option value="high">high (深度推理)</option>
+                  </select>
                 </div>
+
                 <div className="sm:col-span-2">
                   <label className="block text-xs text-slate-400 mb-1">API Base URL</label>
                   <input
                     value={editing.baseUrl}
                     onChange={(e) => setEditing({ ...editing, baseUrl: e.target.value })}
+                    placeholder="http://127.0.0.1:8045/v1"
                     className="w-full px-3 py-2 rounded bg-[#0A0E14] border border-slate-700 text-xs text-slate-100 font-mono"
                   />
                 </div>
+
                 <div className="sm:col-span-2">
-                  <label className="block text-xs text-slate-400 mb-1">API Key（本地 Ollama 可留空或填 ollama）</label>
+                  <label className="block text-xs text-slate-400 mb-1">API Key</label>
                   <input
                     type="password"
                     value={editing.apiKey}
@@ -152,6 +186,59 @@ export default function Settings() {
                     className="w-full px-3 py-2 rounded bg-[#0A0E14] border border-slate-700 text-xs text-slate-100 font-mono"
                   />
                 </div>
+
+                <div className="sm:col-span-2">
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs text-slate-400">模型名称 (Model)</label>
+                    <button
+                      onClick={handleFetchModels}
+                      disabled={fetchingModels}
+                      className="flex items-center gap-1 text-[11px] text-cyan-400 hover:text-cyan-300"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${fetchingModels ? "animate-spin" : ""}`} />
+                      获取可用模型 (/v1/models)
+                    </button>
+                  </div>
+                  {availableModels.length > 0 ? (
+                    <select
+                      value={editing.model}
+                      onChange={(e) => setEditing({ ...editing, model: e.target.value })}
+                      className="w-full px-3 py-2 rounded bg-[#0A0E14] border border-cyan-500/40 text-xs text-slate-100 font-mono"
+                    >
+                      {availableModels.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      value={editing.model}
+                      onChange={(e) => setEditing({ ...editing, model: e.target.value })}
+                      className="w-full px-3 py-2 rounded bg-[#0A0E14] border border-slate-700 text-xs text-slate-100 font-mono"
+                    />
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">上下文窗口 (Context Window)</label>
+                  <input
+                    type="number"
+                    value={editing.contextWindow}
+                    onChange={(e) => setEditing({ ...editing, contextWindow: Number(e.target.value) || 128000 })}
+                    className="w-full px-3 py-2 rounded bg-[#0A0E14] border border-slate-700 text-xs text-slate-100 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">最大输出 Token (max_tokens)</label>
+                  <input
+                    type="number"
+                    value={editing.maxTokens}
+                    onChange={(e) => setEditing({ ...editing, maxTokens: Number(e.target.value) || 8192 })}
+                    className="w-full px-3 py-2 rounded bg-[#0A0E14] border border-slate-700 text-xs text-slate-100 font-mono"
+                  />
+                </div>
+
                 <div>
                   <label className="block text-xs text-slate-400 mb-1">并发请求数 (1-12)</label>
                   <input
@@ -164,26 +251,48 @@ export default function Settings() {
                   />
                 </div>
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">单批词条数 (5-60)</label>
-                  <input
-                    type="number"
-                    min={5}
-                    max={60}
-                    value={editing.batchSize}
-                    onChange={(e) => setEditing({ ...editing, batchSize: Number(e.target.value) || 20 })}
-                    className="w-full px-3 py-2 rounded bg-[#0A0E14] border border-slate-700 text-xs text-slate-100 font-mono"
-                  />
+                  <label className="block text-xs text-slate-400 mb-1">单批词条数 / 失败重试次数</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="number"
+                      min={5}
+                      max={60}
+                      value={editing.batchSize}
+                      onChange={(e) => setEditing({ ...editing, batchSize: Number(e.target.value) || 20 })}
+                      className="w-1/2 px-3 py-2 rounded bg-[#0A0E14] border border-slate-700 text-xs text-slate-100 font-mono"
+                      title="单批词条数"
+                    />
+                    <input
+                      type="number"
+                      min={0}
+                      max={5}
+                      value={editing.maxRetries}
+                      onChange={(e) => setEditing({ ...editing, maxRetries: Number(e.target.value) || 0 })}
+                      className="w-1/2 px-3 py-2 rounded bg-[#0A0E14] border border-slate-700 text-xs text-slate-100 font-mono"
+                      title="失败重试次数"
+                    />
+                  </div>
                 </div>
               </div>
 
-              <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={editing.isDefault}
-                  onChange={(e) => setEditing({ ...editing, isDefault: e.target.checked })}
-                />
-                设为默认翻译模型
-              </label>
+              <div className="flex flex-wrap items-center gap-5">
+                <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editing.supportsVision}
+                    onChange={(e) => setEditing({ ...editing, supportsVision: e.target.checked })}
+                  />
+                  启用多模态图片上下文（支持界面截图辅助翻译）
+                </label>
+                <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editing.isDefault}
+                    onChange={(e) => setEditing({ ...editing, isDefault: e.target.checked })}
+                  />
+                  设为默认翻译模型
+                </label>
+              </div>
 
               {testResult && (
                 <div

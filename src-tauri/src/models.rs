@@ -83,7 +83,30 @@ pub struct LlmProfile {
     pub concurrency: i64,
     pub batch_size: i64,
     pub temperature: f64,
+    #[serde(default = "default_reasoning")]
+    pub reasoning_effort: String, // none | low | medium | high
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: i64,
+    #[serde(default = "default_context_window")]
+    pub context_window: i64,
+    #[serde(default = "default_retries")]
+    pub max_retries: i64,
+    #[serde(default)]
+    pub supports_vision: bool,
     pub is_default: bool,
+}
+
+fn default_reasoning() -> String {
+    "none".into()
+}
+fn default_max_tokens() -> i64 {
+    8192
+}
+fn default_context_window() -> i64 {
+    128000
+}
+fn default_retries() -> i64 {
+    3
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

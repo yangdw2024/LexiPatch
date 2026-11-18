@@ -193,6 +193,11 @@ pub fn delete_llm_profile(db: State<DbState>, id: String) -> Result<(), String> 
 }
 
 #[tauri::command]
+pub async fn fetch_llm_models(base_url: String, api_key: String) -> Result<Vec<String>, String> {
+    llm::fetch_models(&base_url, &api_key).await
+}
+
+#[tauri::command]
 pub async fn test_llm_connection(profile: LlmProfile) -> Result<String, String> {
     llm::test_connection(&profile).await
 }
@@ -205,6 +210,7 @@ pub async fn run_llm_translate(
     file_id: Option<String>,
     profile_id: String,
     only_untranslated: bool,
+    reference_image_data_url: Option<String>,
 ) -> Result<(usize, usize, usize), String> {
     llm::run_project_translation(
         &app,
@@ -213,6 +219,7 @@ pub async fn run_llm_translate(
         file_id.as_deref(),
         &profile_id,
         only_untranslated,
+        reference_image_data_url,
     )
     .await
 }

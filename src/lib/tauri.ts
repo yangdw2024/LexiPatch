@@ -101,13 +101,19 @@ export const api = {
   listLlmProfiles: () => invoke<LlmProfile[]>("list_llm_profiles"),
   upsertLlmProfile: (profile: LlmProfile) => invoke<void>("upsert_llm_profile", { profile }),
   deleteLlmProfile: (id: string) => invoke<void>("delete_llm_profile", { id }),
+  fetchLlmModels: (baseUrl: string, apiKey: string) =>
+    invoke<string[]>("fetch_llm_models", { baseUrl, apiKey }),
   testLlmConnection: (profile: LlmProfile) => invoke<string>("test_llm_connection", { profile }),
   runLlmTranslate: (params: {
     projectId: string;
     fileId: string | null;
     profileId: string;
     onlyUntranslated: boolean;
-  }) => invoke<[number, number, number]>("run_llm_translate", params),
+    referenceImageDataUrl?: string | null;
+  }) => invoke<[number, number, number]>("run_llm_translate", {
+    ...params,
+    referenceImageDataUrl: params.referenceImageDataUrl ?? null,
+  }),
 
   onTranslateProgress: (cb: (ev: TranslateProgressEvent) => void): Promise<UnlistenFn> =>
     listen<TranslateProgressEvent>("translate:progress", (e) => cb(e.payload)),

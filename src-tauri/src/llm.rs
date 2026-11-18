@@ -3,32 +3,12 @@ use crate::models::{GlossaryEntry, LlmProfile, Project, TranslateProgressEvent, 
 use crate::qa::validate_translation;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Semaphore;
-
-#[derive(Serialize)]
-struct ChatRequest {
-    model: String,
-    temperature: f64,
-    messages: Vec<ChatMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    response_format: Option<ResponseFormat>,
-}
-
-#[derive(Serialize)]
-struct ResponseFormat {
-    #[serde(rename = "type")]
-    kind: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct ChatMessage {
-    role: String,
-    content: String,
-}
 
 #[derive(Deserialize)]
 struct ChatResponse {
@@ -37,17 +17,32 @@ struct ChatResponse {
 
 #[derive(Deserialize)]
 struct ChatChoice {
-    message: ChatMessage,
+    message: ChatChoiceMessage,
+}
+
+#[derive(Deserialize)]
+struct ChatChoiceMessage {
+    content: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ModelsListResponse {
+    data: Vec<ModelItem>,
+}
+
+#[derive(Deserialize)]
+struct ModelItem {
+    id: String,
 }
 
 fn build_client() -> Result<Client, String> {
     Client::builder()
-        .timeout(Duration::from_secs(90))
+        .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))
 }
 
-fn endpoint_url(base_url: &str) -> String {
+fn chat_endpoint_url(base_url: &str) -> String {
     let trimmed = base_url.trim().trim_end_matches('/');
     if trimmed.ends_with("/chat/completions") {
         trimmed.to_string()
@@ -56,20 +51,53 @@ fn endpoint_url(base_url: &str) -> String {
     }
 }
 
+fn models_endpoint_url(base_url: &str) -> String {
+    let trimmed = base_url
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches("/chat/completions");
+    format!("{}/models", trimmed)
+}
+
+pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
+    let client = build_client()?;
+    let url = models_endpoint_url(base_url);
+    let mut builder = client.get(&url);
+    if !api_key.trim().is_empty() {
+        builder = builder.bearer_auth(api_key.trim());
+    }
+    let resp = builder
+        .send()
+        .await
+        .map_err(|e| format!("获取模型列表失败: {e}"))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("HTTP {}: {}", status.as_u16(), body));
+    }
+    let parsed: ModelsListResponse =
+        serde_json::from_str(&body).map_err(|e| format!("解析模型列表失败: {e}"))?;
+    let mut ids: Vec<String> = parsed.data.into_iter().map(|m| m.id).collect();
+    ids.sort();
+    Ok(ids)
+}
+
 pub async fn test_connection(profile: &LlmProfile) -> Result<String, String> {
     let client = build_client()?;
-    let url = endpoint_url(&profile.base_url);
-    let req = ChatRequest {
-        model: profile.model.clone(),
-        temperature: 0.0,
-        messages: vec![ChatMessage {
-            role: "user".into(),
-            content: "Reply with OK only.".into(),
-        }],
-        response_format: None,
-    };
+    let url = chat_endpoint_url(&profile.base_url);
+    let mut payload = json!({
+        "model": profile.model,
+        "temperature": 0.0,
+        "max_tokens": 32,
+        "messages": [
+            { "role": "user", "content": "Reply with OK only." }
+        ]
+    });
+    if profile.reasoning_effort != "none" && !profile.reasoning_effort.is_empty() {
+        payload["reasoning_effort"] = json!(profile.reasoning_effort);
+    }
 
-    let mut builder = client.post(&url).json(&req);
+    let mut builder = client.post(&url).json(&payload);
     if !profile.api_key.trim().is_empty() {
         builder = builder.bearer_auth(profile.api_key.trim());
     }
@@ -146,6 +174,7 @@ async fn translate_batch_request(
     profile: &LlmProfile,
     sys_prompt: &str,
     batch: &[TranslationUnit],
+    reference_image_data_url: Option<&str>,
 ) -> Result<Vec<(String, String)>, String> {
     let items: Vec<InputItem> = batch
         .iter()
@@ -156,63 +185,93 @@ async fn translate_batch_request(
         })
         .collect();
     let user_json = serde_json::to_string(&items).map_err(|e| e.to_string())?;
+    let prompt_text = format!("请翻译以下 JSON 数组中的每一项：\n{}", user_json);
 
-    let req = ChatRequest {
-        model: profile.model.clone(),
-        temperature: profile.temperature,
-        messages: vec![
-            ChatMessage {
-                role: "system".into(),
-                content: sys_prompt.to_string(),
-            },
-            ChatMessage {
-                role: "user".into(),
-                content: format!("请翻译以下 JSON 数组中的每一项：\n{}", user_json),
-            },
-        ],
-        response_format: if profile.provider == "ollama" {
-            None
-        } else {
-            Some(ResponseFormat {
-                kind: "json_object".into(),
-            })
-        },
+    let user_content: Value = if let (true, Some(img_url)) = (profile.supports_vision, reference_image_data_url) {
+        json!([
+            { "type": "text", "text": format!("以下是软件界面参考截图，请结合界面上下文翻译以下 JSON 数组：\n{}", user_json) },
+            { "type": "image_url", "image_url": { "url": img_url } }
+        ])
+    } else {
+        json!(prompt_text)
     };
 
-    let url = endpoint_url(&profile.base_url);
-    let mut builder = client.post(&url).json(&req);
-    if !profile.api_key.trim().is_empty() {
-        builder = builder.bearer_auth(profile.api_key.trim());
+    let mut payload = json!({
+        "model": profile.model,
+        "temperature": profile.temperature,
+        "messages": [
+            { "role": "system", "content": sys_prompt },
+            { "role": "user", "content": user_content }
+        ]
+    });
+
+    if profile.max_tokens > 0 {
+        payload["max_tokens"] = json!(profile.max_tokens);
+    }
+    if profile.reasoning_effort != "none" && !profile.reasoning_effort.is_empty() {
+        payload["reasoning_effort"] = json!(profile.reasoning_effort);
+    }
+    if profile.provider != "ollama" {
+        payload["response_format"] = json!({ "type": "json_object" });
     }
 
-    let resp = builder.send().await.map_err(|e| format!("请求超时或网络错误: {e}"))?;
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!("API 返回 {}: {}", status.as_u16(), body));
+    let url = chat_endpoint_url(&profile.base_url);
+    let max_attempts = (profile.max_retries.max(0) as u32).min(5) + 1;
+    let mut last_err = String::new();
+
+    for attempt in 0..max_attempts {
+        if attempt > 0 {
+            let delay_ms = 600 * (1u64 << (attempt - 1));
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+
+        let mut builder = client.post(&url).json(&payload);
+        if !profile.api_key.trim().is_empty() {
+            builder = builder.bearer_auth(profile.api_key.trim());
+        }
+
+        match builder.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                if status.as_u16() == 429 || status.is_server_error() {
+                    last_err = format!("API 返回 {}: {}", status.as_u16(), body);
+                    continue;
+                }
+                if !status.is_success() {
+                    return Err(format!("API 返回 {}: {}", status.as_u16(), body));
+                }
+                let parsed: ChatResponse = serde_json::from_str(&body)
+                    .map_err(|e| format!("解析 API 响应失败: {e}"))?;
+                let content = parsed
+                    .choices
+                    .first()
+                    .and_then(|c| c.message.content.as_deref())
+                    .unwrap_or("");
+                let clean = strip_code_fences(content);
+
+                if let Ok(wrapper) = serde_json::from_str::<OutputWrapper>(clean) {
+                    return Ok(wrapper
+                        .translations
+                        .into_iter()
+                        .map(|x| (x.id, x.target))
+                        .collect());
+                }
+                if let Ok(arr) = serde_json::from_str::<Vec<OutputItem>>(clean) {
+                    return Ok(arr.into_iter().map(|x| (x.id, x.target)).collect());
+                }
+                return Err(format!(
+                    "模型未返回约定的 JSON 结构: {}",
+                    clean.chars().take(180).collect::<String>()
+                ));
+            }
+            Err(e) => {
+                last_err = format!("请求超时或网络错误: {e}");
+            }
+        }
     }
 
-    let parsed: ChatResponse =
-        serde_json::from_str(&body).map_err(|e| format!("解析 API 响应失败: {e}"))?;
-    let content = parsed
-        .choices
-        .first()
-        .map(|c| c.message.content.as_str())
-        .unwrap_or("");
-    let clean = strip_code_fences(content);
-
-    if let Ok(wrapper) = serde_json::from_str::<OutputWrapper>(clean) {
-        return Ok(wrapper
-            .translations
-            .into_iter()
-            .map(|x| (x.id, x.target))
-            .collect());
-    }
-    if let Ok(arr) = serde_json::from_str::<Vec<OutputItem>>(clean) {
-        return Ok(arr.into_iter().map(|x| (x.id, x.target)).collect());
-    }
-
-    Err(format!("模型未返回约定的 JSON 结构: {}", &clean.chars().take(180).collect::<String>()))
+    Err(last_err)
 }
 
 pub async fn run_project_translation(
@@ -222,6 +281,7 @@ pub async fn run_project_translation(
     file_id: Option<&str>,
     profile_id: &str,
     only_untranslated: bool,
+    reference_image_data_url: Option<String>,
 ) -> Result<(usize, usize, usize), String> {
     let project = db
         .get_project(project_id)?
@@ -260,7 +320,6 @@ pub async fn run_project_translation(
         return Ok((0, 0, 0));
     }
 
-    // Step 1: Pre-fill exact Translation Memory matches
     let mut mem_updates = Vec::new();
     let mut llm_queue = Vec::new();
     for u in target_units {
@@ -290,7 +349,11 @@ pub async fn run_project_translation(
             completed,
             succeeded,
             failed,
-            message: format!("翻译记忆命中 {} 条，正在并发调用 {}...", mem_updates.len(), profile.model),
+            message: format!(
+                "翻译记忆命中 {} 条，正在并发调用 {}...",
+                mem_updates.len(),
+                profile.model
+            ),
             done: llm_queue.is_empty(),
         },
     );
@@ -299,13 +362,13 @@ pub async fn run_project_translation(
         return Ok((total, succeeded, failed));
     }
 
-    // Step 2: Concurrent LLM batches
     let batch_size = (profile.batch_size.max(5) as usize).min(60);
     let concurrency = (profile.concurrency.max(1) as usize).min(12);
     let sem = Arc::new(Semaphore::new(concurrency));
     let client = Arc::new(build_client()?);
     let sys_prompt = Arc::new(build_system_prompt(&project, &glossary));
     let profile_arc = Arc::new(profile);
+    let img_arc = Arc::new(reference_image_data_url);
 
     let chunks: Vec<Vec<TranslationUnit>> = llm_queue
         .chunks(batch_size)
@@ -318,9 +381,17 @@ pub async fn run_project_translation(
         let client = Arc::clone(&client);
         let sys_prompt = Arc::clone(&sys_prompt);
         let profile = Arc::clone(&profile_arc);
+        let img = Arc::clone(&img_arc);
         join_set.spawn(async move {
             let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
-            let res = translate_batch_request(&client, &profile, &sys_prompt, &chunk).await;
+            let res = translate_batch_request(
+                &client,
+                &profile,
+                &sys_prompt,
+                &chunk,
+                img.as_deref(),
+            )
+            .await;
             Ok::<(Vec<TranslationUnit>, Result<Vec<(String, String)>, String>), String>((chunk, res))
         });
     }
@@ -359,7 +430,10 @@ pub async fn run_project_translation(
                         completed,
                         succeeded,
                         failed,
-                        message: format!("已完成 {}/{} 条（成功 {}，失败 {}）", completed, total, succeeded, failed),
+                        message: format!(
+                            "已完成 {}/{} 条（成功 {}，失败 {}）",
+                            completed, total, succeeded, failed
+                        ),
                         done: false,
                     },
                 );
@@ -392,7 +466,10 @@ pub async fn run_project_translation(
             completed,
             succeeded,
             failed,
-            message: format!("翻译完成：共 {} 条，成功 {} 条，失败 {} 条", total, succeeded, failed),
+            message: format!(
+                "翻译完成：共 {} 条，成功 {} 条，失败 {} 条",
+                total, succeeded, failed
+            ),
             done: true,
         },
     );

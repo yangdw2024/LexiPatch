@@ -98,6 +98,11 @@ pub fn init_db(db_path: &Path) -> Result<DbState, String> {
             concurrency INTEGER NOT NULL DEFAULT 4,
             batch_size INTEGER NOT NULL DEFAULT 25,
             temperature REAL NOT NULL DEFAULT 0.2,
+            reasoning_effort TEXT NOT NULL DEFAULT 'none',
+            max_tokens INTEGER NOT NULL DEFAULT 8192,
+            context_window INTEGER NOT NULL DEFAULT 128000,
+            max_retries INTEGER NOT NULL DEFAULT 3,
+            supports_vision INTEGER NOT NULL DEFAULT 0,
             is_default INTEGER NOT NULL DEFAULT 0
         );
 
@@ -115,6 +120,18 @@ pub fn init_db(db_path: &Path) -> Result<DbState, String> {
         ",
     )
     .map_err(|e| format!("初始化表结构失败: {e}"))?;
+
+    // Smooth schema migration for existing DBs
+    let migrations = [
+        "ALTER TABLE llm_profiles ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT 'none'",
+        "ALTER TABLE llm_profiles ADD COLUMN max_tokens INTEGER NOT NULL DEFAULT 8192",
+        "ALTER TABLE llm_profiles ADD COLUMN context_window INTEGER NOT NULL DEFAULT 128000",
+        "ALTER TABLE llm_profiles ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 3",
+        "ALTER TABLE llm_profiles ADD COLUMN supports_vision INTEGER NOT NULL DEFAULT 0",
+    ];
+    for sql in migrations {
+        let _ = conn.execute(sql, []);
+    }
 
     seed_defaults(&conn)?;
     Ok(DbState {
@@ -586,11 +603,12 @@ impl DbState {
     pub fn list_llm_profiles(&self) -> Result<Vec<LlmProfile>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, provider, base_url, api_key, model, concurrency, batch_size, temperature, is_default FROM llm_profiles")
+            .prepare("SELECT id, name, provider, base_url, api_key, model, concurrency, batch_size, temperature, reasoning_effort, max_tokens, context_window, max_retries, supports_vision, is_default FROM llm_profiles")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
-                let is_def: i64 = r.get(9)?;
+                let vision: i64 = r.get(13)?;
+                let is_def: i64 = r.get(14)?;
                 Ok(LlmProfile {
                     id: r.get(0)?,
                     name: r.get(1)?,
@@ -601,6 +619,11 @@ impl DbState {
                     concurrency: r.get(6)?,
                     batch_size: r.get(7)?,
                     temperature: r.get(8)?,
+                    reasoning_effort: r.get(9)?,
+                    max_tokens: r.get(10)?,
+                    context_window: r.get(11)?,
+                    max_retries: r.get(12)?,
+                    supports_vision: vision != 0,
                     is_default: is_def != 0,
                 })
             })
@@ -621,8 +644,8 @@ impl DbState {
             p.id
         };
         tx.execute(
-            "INSERT INTO llm_profiles (id, name, provider, base_url, api_key, model, concurrency, batch_size, temperature, is_default)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO llm_profiles (id, name, provider, base_url, api_key, model, concurrency, batch_size, temperature, reasoning_effort, max_tokens, context_window, max_retries, supports_vision, is_default)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET
                name = excluded.name,
                provider = excluded.provider,
@@ -632,6 +655,11 @@ impl DbState {
                concurrency = excluded.concurrency,
                batch_size = excluded.batch_size,
                temperature = excluded.temperature,
+               reasoning_effort = excluded.reasoning_effort,
+               max_tokens = excluded.max_tokens,
+               context_window = excluded.context_window,
+               max_retries = excluded.max_retries,
+               supports_vision = excluded.supports_vision,
                is_default = excluded.is_default",
             params![
                 id,
@@ -643,6 +671,11 @@ impl DbState {
                 p.concurrency,
                 p.batch_size,
                 p.temperature,
+                p.reasoning_effort,
+                p.max_tokens,
+                p.context_window,
+                p.max_retries,
+                if p.supports_vision { 1 } else { 0 },
                 if p.is_default { 1 } else { 0 }
             ],
         )

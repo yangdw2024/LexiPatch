@@ -51,6 +51,7 @@ export default function Translate() {
 
   const [previewText, setPreviewText] = useState<string | null>(null);
   const [editingTargetPath, setEditingTargetPath] = useState<string>("");
+  const [refImageUrl, setRefImageUrl] = useState<string | null>(null);
 
   useEffect(() => {
     api.listProjects().then((list) => {
@@ -168,6 +169,7 @@ export default function Translate() {
         fileId: activeFileId,
         profileId: selectedProfileId,
         onlyUntranslated: true,
+        referenceImageDataUrl: refImageUrl,
       });
       await loadProjectData(activeProjectId);
     } catch (e) {
@@ -238,6 +240,21 @@ export default function Translate() {
         </div>
 
         <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-slate-700 hover:border-slate-500 text-xs text-slate-300 cursor-pointer">
+            <span>{refImageUrl ? "已附带界面截图" : "附带截图上下文"}</span>
+            <input
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = () => setRefImageUrl(String(reader.result));
+                reader.readAsDataURL(file);
+              }}
+            />
+          </label>
           <button
             onClick={handlePreview}
             disabled={files.length === 0}

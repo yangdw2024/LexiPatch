@@ -45,6 +45,7 @@ pub fn run() {
             commands::list_llm_profiles,
             commands::upsert_llm_profile,
             commands::delete_llm_profile,
+            commands::fetch_llm_models,
             commands::test_llm_connection,
             commands::run_llm_translate,
             commands::build_exe_patcher,
