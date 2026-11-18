@@ -1,6 +1,6 @@
 [package]
 name = "transcore-app"
-version = "2.0.0"
+version = "2.0.1"
 description = "译核 TransCore - 软件汉化与独立补丁生成平台"
 authors = ["TransCore Team"]
 edition = "2021"

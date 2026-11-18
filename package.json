@@ -1,7 +1,7 @@
 {
   "name": "lexipatch",
   "productName": "译铸 LexiPatch",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "软件汉化与独立 .exe 补丁铸造平台 (Rust + Tauri 2)",
   "author": "LexiPatch Team",
   "private": true,
